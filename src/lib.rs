@@ -52,7 +52,7 @@ pub fn sel(s: &str) -> scraper::Selector {
 }
 
 /// Version string reported in the UI and in HTTP responses.
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.1.0";
 
 pub fn banner() -> String {
     format!("Ferris {VERSION} — a browser engine written in Rust")
