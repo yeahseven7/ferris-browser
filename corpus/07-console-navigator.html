@@ -1,0 +1,12 @@
+<html><head><title>corpus 07</title></head><body>
+<div id="out">pending</div>
+<script>
+  console.log('corpus 07 says hi', 1 + 1);
+  console.warn('a warning');
+  var ua = navigator.userAgent;
+  var href = location.href;
+  document.getElementById('out').textContent =
+    (ua.indexOf('Ferris') >= 0 && href.indexOf('corpus.ferris') >= 0)
+      ? 'PASS-07-CONSOLE' : 'FAIL-07-' + ua;
+</script>
+</body></html>

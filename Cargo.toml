@@ -1,0 +1,52 @@
+[package]
+name = "ferris-browser"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A from-scratch browser engine in Rust: fetch, DOM, CSS cascade, layout, paint, native window, JS (Boa)."
+
+[lib]
+name = "ferris"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ferris-browser"
+path = "src/main.rs"
+
+[dependencies]
+ab_glyph = "0.2.32"
+boa_engine = { version = "0.22.0", optional = true, default-features = false, features = ["annex-b"] }
+ego-tree = "0.11"
+image = "0.25.10"
+scraper = "0.29.0"
+softbuffer = "0.4"
+tiny-skia = "0.12.0"
+ureq = { version = "3.5", features = ["gzip", "brotli", "charset"] }
+url = "2.5.8"
+winit = "0.30"
+
+[profile.release]
+opt-level = 2
+
+# x11rb-protocol is enormous; compiling it at opt-level 2 peaks above this
+# sandbox's RAM and gets OOM-killed. opt-level 0 for that one crate keeps the
+# build feasible here without touching the engine's own optimization.
+[profile.release.package.x11rb-protocol]
+opt-level = 0
+
+# boa_engine is a very large crate; opt-level 0 keeps its codegen inside
+# small-memory sandboxes (~1 GB). On a normal machine you can raise this.
+[profile.release.package.boa_engine]
+opt-level = 0
+
+[profile.release.package.boa_parser]
+opt-level = 1
+
+[profile.release.package.boa_ast]
+opt-level = 1
+
+[features]
+# JavaScript via Boa, bound to Ferris's own swappable DOM mirror.
+js = ["dep:boa_engine"]
+# Adds Date/Temporal + float16 to the JS build (heavier compile).
+js-date = ["js", "boa_engine/temporal", "boa_engine/float16"]

@@ -1,0 +1,13 @@
+<html><head><title>corpus 02</title></head><body>
+<ul id="list"></ul><div id="out">pending</div>
+<script>
+  for (var i = 1; i <= 3; i++) {
+    var li = document.createElement('li');
+    li.className = 'row';
+    li.textContent = 'item ' + i;
+    document.getElementById('list').appendChild(li);
+  }
+  document.getElementById('out').textContent =
+    'PASS-02-APPEND-' + document.getElementsByClassName('row').length;
+</script>
+</body></html>

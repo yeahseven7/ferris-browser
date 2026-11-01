@@ -1,0 +1,17 @@
+Ferris (ferris-browser) — licensing
+
+The Rust source code of this project (everything except the embedded fonts
+and the generated icon artwork) is licensed at your option under either:
+
+  * MIT License            — see LICENSE-MIT
+  * Apache License 2.0     — see LICENSE-APACHE
+
+"MIT OR Apache-2.0": you may pick whichever of the two suits you.
+
+Bundled third-party material:
+
+  * The DejaVu typefaces embedded in the binary (assets/fonts/*.ttf) are
+    distributed under the DejaVu licence, a derivative of the Bitstream Vera
+    licence: see assets/fonts/LICENSE-DejaVu. That licence requires the
+    notice to accompany any redistribution, which the packaging script
+    handles by shipping it inside the AppImage and the release tarball.

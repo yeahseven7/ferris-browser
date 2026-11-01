@@ -1,0 +1,12 @@
+<html><head><title>corpus 04</title></head><body>
+<div id="d" class="a b">x</div><div id="out">pending</div>
+<script>
+  var d = document.getElementById('d');
+  d.classList.add('c');
+  d.classList.remove('a');
+  d.classList.toggle('b');
+  d.classList.toggle('z');
+  document.getElementById('out').textContent =
+    'PASS-04-CLASS-' + d.className.split(' ').sort().join('');
+</script>
+</body></html>

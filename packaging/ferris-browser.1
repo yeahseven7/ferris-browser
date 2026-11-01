@@ -1,0 +1,72 @@
+.TH FERRIS-BROWSER 1 "2026" "ferris-browser 1.0.0" "General Commands Manual"
+.SH NAME
+ferris-browser \- a from-scratch browser engine written in Rust
+.SH SYNOPSIS
+.B ferris-browser
+[\fICOMMAND\fR] [\fIARGUMENTS\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B ferris-browser
+implements the whole browser pipeline itself: HTTP(S) fetching, HTML parsing
+into a DOM, a CSS cascade, layout, painting, and a native window (Wayland or
+X11) with browser furniture (tab strip, omnibox).  It can also run page
+JavaScript when built with the
+.I js
+Cargo feature (Boa engine).
+.PP
+With no arguments a short command summary is printed.
+.PP
+With no arguments (or with a bare URL) the native browser window is opened —
+the start page, or the given URL.  This is what the desktop entry launches.
+.SH COMMANDS
+.TP
+.BR serve " [\-\-port N]"
+Run the browser UI over HTTP on the given port (default 8080): point any
+browser at it to use the engine headlessly.
+.TP
+.BR window " URL [\-\-width N] [\-\-height H]"
+Open the native window and browse the given URL.  Requires a display server
+(WAYLAND_DISPLAY or DISPLAY).
+.TP
+.BR shot " URL [\-\-width N] [\-\-height H] [\-o FILE]"
+Render the page headlessly and write a PNG (default out.png).
+.TP
+.BR info " URL"
+Print parse/layout statistics for the page.
+.TP
+.BR shelltest " URL [more URLs] [\-\-width N] [\-o FILE]"
+Headless check that the window's interactive path renders the given pages.
+.TP
+.BR jscorpus " [URLs...]"
+Run the bundled JavaScript compatibility corpus (requires the
+.I js
+feature); exits non-zero on any failing entry.
+.TP
+.BR version ", " help
+Print the version / the command summary.
+.SH BUILD FEATURES
+.TP
+.I js
+Page JavaScript via the Boa engine (no ICU).
+.TP
+.I js-date
+Adds Date/Temporal support on top of
+.IR js .
+.SH ENVIRONMENT
+.TP
+.I WAYLAND_DISPLAY ", " DISPLAY
+Select the display server for
+.BR window .
+Headless commands (serve, shot, info, shelltest, jscorpus, version) work
+without either.
+.SH FILES
+The DejaVu typefaces and the application icon are embedded in the binary;
+their licences ship in /usr/share/licenses/ferris-browser/.
+.SH EXIT STATUS
+Zero on success; non-zero on failure (including any failing
+.B jscorpus
+entry).
+.SH LICENSE
+MIT OR Apache-2.0 at your option; bundled DejaVu fonts are distributed under
+the DejaVu licence (see /usr/share/licenses/ferris-browser/LICENSE-DejaVu).
+.SH SEE ALSO
+The project README, shipped in /usr/share/doc/ferris-browser/.

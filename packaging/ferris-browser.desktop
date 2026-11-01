@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.1
+Type=Application
+Name=Ferris Browser
+GenericName=Web Browser
+Comment=A from-scratch browser engine written in Rust
+Exec=ferris-browser %u
+Icon=ferris-browser
+Terminal=false
+Categories=Network;WebBrowser;
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=false
+Keywords=web;browser;engine;rust;

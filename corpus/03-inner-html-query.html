@@ -1,0 +1,11 @@
+<html><head><title>corpus 03</title></head><body>
+<div id="host"></div><div id="out">pending</div>
+<script>
+  document.getElementById('host').innerHTML =
+    '<p class="x">alpha</p><p class="x">beta</p>';
+  var n = document.querySelectorAll('.x').length;
+  var first = document.querySelector('.x');
+  document.getElementById('out').textContent =
+    'PASS-03-INNER-' + n + '-' + first.textContent;
+</script>
+</body></html>

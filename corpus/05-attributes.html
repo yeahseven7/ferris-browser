@@ -1,0 +1,13 @@
+<html><head><title>corpus 05</title></head><body>
+<div id="d">x</div><div id="out">pending</div>
+<script>
+  var d = document.getElementById('d');
+  d.setAttribute('data-kind', 'fixture');
+  var ok = d.getAttribute('data-kind') === 'fixture' && d.hasAttribute('data-kind');
+  d.setAttribute('data-kind', 'changed');
+  ok = ok && d.getAttribute('data-kind') === 'changed';
+  d.removeAttribute('data-kind');
+  ok = ok && !d.hasAttribute('data-kind');
+  document.getElementById('out').textContent = ok ? 'PASS-05-ATTR' : 'FAIL-05-ATTR';
+</script>
+</body></html>

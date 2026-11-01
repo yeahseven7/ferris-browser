@@ -1,0 +1,14 @@
+<html><head><title>corpus 10</title></head><body>
+<div id="out">pending</div>
+<script>window.state = [];</script>
+<script>
+  window.state.push('second');
+  setTimeout(function () { window.state.push('timer'); }, 1000);
+</script>
+<script>
+  window.state.push('third');
+  document.getElementById('out').textContent =
+    window.state.join(',') === 'second,timer,third'
+      ? 'PASS-10-ORDER' : 'FAIL-10-' + window.state.join(',');
+</script>
+</body></html>

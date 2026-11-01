@@ -1,0 +1,11 @@
+<html><head><title>corpus 06</title></head><body>
+<div id="d">x</div><div id="out">pending</div>
+<script>
+  var d = document.getElementById('d');
+  d.style.setProperty('color', 'rgb(200, 30, 30)');
+  d.style.setProperty('font-size', '20px');
+  var round = d.style.getPropertyValue('color');
+  document.getElementById('out').textContent =
+    round === 'rgb(200, 30, 30)' ? 'PASS-06-STYLE' : 'FAIL-06-' + round;
+</script>
+</body></html>
