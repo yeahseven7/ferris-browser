@@ -87,9 +87,10 @@ impl PageView {
         Self::from_render(r)
     }
 
-    /// Render literal HTML, no network. Used for the start page.
-    pub fn from_html(html: &str, width: u32) -> Result<PageView, String> {
-        let r = engine::render_html(html, "https://start.ferris/", width, false);
+    /// Render literal HTML. Used for the start page. When `fetch_images` is
+    /// set, remote images (e.g. video thumbnails) are fetched over the network.
+    pub fn from_html(html: &str, width: u32, fetch_images: bool) -> Result<PageView, String> {
+        let r = engine::render_html(html, "https://start.ferris/", width, fetch_images);
         Self::from_render(r)
     }
 
@@ -114,18 +115,44 @@ impl PageView {
     }
 }
 
+/// A few iconic, stable videos for the start-page cards. Ferris can't play
+/// video itself, so these (and any YouTube URL) are handed to `mpv`/`yt-dlp`.
+const START_VIDEOS: &[(&str, &str)] = &[
+    ("jNQXAC9IVRw", "Me at the zoo — the very first YouTube video"),
+    ("dQw4w9WgXcQ", "Rick Astley — Never Gonna Give You Up"),
+    ("9bZkp7q19f0", "PSY — GANGNAM STYLE"),
+];
+
 /// The shell's start page, rendered by the engine itself.
 pub fn start_page_html() -> String {
+    let mut cards = String::new();
+    for (id, title) in START_VIDEOS {
+        let url = format!("https://www.youtube.com/watch?v={id}");
+        // Text cards, not <img> thumbnails: the engine's inline replaced-element
+        // paint (layout.rs `top = baseline - img_h`) overflows its line box, so
+        // thumbnails misposition once other content shares the flow. Text links
+        // render perfectly and still route through the mpv intercept. Thumbnail
+        // cards return when replaced-element layout is fixed (see README).
+        cards.push_str(&format!(
+            "<li><a href=\"{url}\">{title}</a> \
+             <span class=\"dim\">&mdash; plays in mpv</span></li>",
+            url = url,
+            title = crate::engine::html_escape(title),
+        ));
+    }
     format!(
         r#"<html><head><title>New tab</title><style>
 body {{ font-family: sans-serif; margin: 0; background: #202124; color: #e8eaed }}
 .wrap {{ padding: 48px }}
 h1 {{ font-size: 30px; margin: 0 0 6px 0; color: #8ab4f8 }}
+h2 {{ font-size: 18px; font-weight: normal; margin: 34px 0 6px 0; color: #e8eaed }}
 p  {{ font-size: 14px; color: #9aa0a6; margin: 0 0 26px 0; line-height: 22px }}
 ul {{ font-size: 15px; line-height: 30px; color: #e8eaed; padding-left: 22px }}
 a  {{ color: #8ab4f8 }}
 kbd {{ font-family: monospace; font-size: 12px; color: #e8eaed; background: #3c4043;
        padding: 1px 6px; border-radius: 4px }}
+.hint {{ font-size: 13px; color: #9aa0a6; margin: 0 0 18px 0; line-height: 20px }}
+.dim {{ color: #9aa0a6; font-size: 13px }}
 </style></head><body><div class="wrap">
 <h1>Ferris {version}</h1>
 <p>A browser engine written in Rust. Every pixel in this window came from its own
@@ -139,8 +166,15 @@ rasterizer &mdash; no Chromium, WebKit or system browser anywhere.</p>
 <p>Try: <a href="https://example.com/">example.com</a> &middot;
 <a href="https://news.ycombinator.com/">news.ycombinator.com</a> &middot;
 <a href="http://info.cern.ch/">info.cern.ch</a></p>
+<h2>Watch a video &mdash; opens in mpv</h2>
+<p class="hint">Ferris has no video codec, so it hands every YouTube link to
+<kbd>mpv</kbd> (which resolves the stream with <kbd>yt-dlp</kbd>). Click a title
+below, or paste any YouTube URL into the address bar. Needs <kbd>mpv</kbd> and
+<kbd>yt-dlp</kbd> installed.</p>
+<ul>{cards}</ul>
 </div></body></html>"#,
-        version = crate::VERSION
+        version = crate::VERSION,
+        cards = cards,
     )
 }
 
@@ -730,6 +764,17 @@ impl Tab {
     }
 }
 
+/// True when `href` points at YouTube (the main site, a subdomain like
+/// `m.`/`music.`, or a `youtu.be` short link). Host-based only, so look-alikes
+/// such as `notyoutube.com` or `youtube.com.evil.tld` do not match.
+fn is_youtube(href: &str) -> bool {
+    url::Url::parse(href)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .map(|h| h == "youtu.be" || h == "youtube.com" || h.ends_with(".youtube.com"))
+        .unwrap_or(false)
+}
+
 struct App {
     window: Option<Arc<Window>>,
     context: Option<softbuffer::Context<Arc<Window>>>,
@@ -813,7 +858,7 @@ impl App {
         let w = self.size.0.max(320);
         let view = match url {
             Some(u) => PageView::load(u, w, self.images).ok(),
-            None => PageView::from_html(&start_page_html(), w).ok(),
+            None => PageView::from_html(&start_page_html(), w, self.images).ok(),
         };
         let mut tab = Tab {
             view: None,
@@ -846,6 +891,19 @@ impl App {
     }
 
     fn navigate(&mut self, url: &str, push: bool) {
+        // Ferris can't decode video, so hand YouTube links to an external
+        // player (mpv, which resolves the stream via yt-dlp) instead of
+        // loading YouTube's script-heavy page — which would render as a shell.
+        if is_youtube(url) {
+            self.note = match std::process::Command::new("mpv").arg(url).spawn() {
+                Ok(_) => format!("opened in mpv: {url}"),
+                Err(e) => format!("could not start mpv: {e} (install mpv + yt-dlp)"),
+            };
+            if let Some(win) = &self.window {
+                win.request_redraw();
+            }
+            return;
+        }
         self.note = format!("loading {url} …");
         // Paint the "loading" note before blocking on the network, so the
         // window never looks frozen.
@@ -1704,8 +1762,28 @@ mod tests {
 
     #[test]
     fn start_page_renders_offline() {
-        let v = PageView::from_html(&start_page_html(), 800).expect("start page pixels");
+        let v = PageView::from_html(&start_page_html(), 800, false).expect("start page pixels");
         assert!(v.page_height() > 100);
         assert!(v.links.len() >= 3);
+        assert!(
+            v.links.iter().any(|l| l.href.contains("youtube.com/watch?v=")),
+            "start page must offer the YouTube/mpv cards"
+        );
+    }
+
+    #[test]
+    fn youtube_detection_matches_hosts_only() {
+        assert!(is_youtube("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert!(is_youtube("https://youtube.com/watch?v=x"));
+        assert!(is_youtube("https://m.youtube.com/watch?v=x"));
+        assert!(is_youtube("https://music.youtube.com/watch?v=x"));
+        assert!(is_youtube("https://youtu.be/dQw4w9WgXcQ"));
+        // Must not match look-alikes or unrelated hosts.
+        assert!(!is_youtube("https://notyoutube.com/watch?v=x"));
+        assert!(!is_youtube("https://evil-youtube.com/x"));
+        assert!(!is_youtube("https://youtube.com.evil.tld/x"));
+        assert!(!is_youtube("https://example.com/"));
+        assert!(!is_youtube("https://i.ytimg.com/vi/x/hqdefault.jpg"));
+        assert!(!is_youtube("not a url"));
     }
 }

@@ -104,6 +104,12 @@ Each tab owns its page, its scroll position and its history. The address bar
 is a real text field: click it (or Ctrl+L / F6) to focus with the URL
 selected, type over it, move the caret, Enter to go, Esc to cancel.
 
+The new-tab start page offers a few YouTube clips; clicking one — or pasting any
+YouTube URL into the address bar — does **not** load YouTube's script-heavy
+page. Ferris hands the link to `mpv`, which resolves and plays the stream via
+`yt-dlp`, and the status strip reports `opened in mpv: …` (or asks you to
+install mpv + yt-dlp). Ferris itself ships no video codec.
+
 | Input | Action |
 |---|---|
 | click a link | navigate (hit-tests the link rects layout computed) |
@@ -211,6 +217,10 @@ you want it in the AUR.
       (`ferris jscorpus` = the compat corpus)
 - [x] session layer: persistent cookies + form POST + `document.cookie` /
       `localStorage` / `sessionStorage` (`examples/auth_demo` proves it live)
+- [x] YouTube hand-off: start-page cards + any YouTube URL open in `mpv`
+  (via `yt-dlp`) instead of loading the script-heavy page
+- [ ] replaced-element (`<img>`) line-box/paint alignment so thumbnails sit
+  correctly in mixed text flow (enables image thumbnail cards)
 - [ ] interactive forms in the window: type into `<input>`/`<textarea>`, click
       submit buttons, file uploads, `<select>`
 - [ ] fidelity: floats/positioning, flexbox, shaping (cosmic-text), SVG (resvg)
@@ -278,6 +288,11 @@ of hanging or OOMing; error pages are rendered *through the same engine*.
   live event loop, no DOM events (`click`/`input`/`load` handlers don't fire),
   and no re-layout after script mutation, so **single-page apps still won't
   work** — pages that render entirely client-side show a blank shell.
+- **Inline `<img>` in mixed text flow can misposition.** Replaced elements are
+  placed at `baseline - height` and can overflow their line box, so a thumbnail
+  beside/after text may paint offset. Images render correctly in their own block
+  (which is why the start-page video cards are text links, not thumbnails, until
+  the layout item above lands).
 - **No media, no video, no DRM.** There is no `<video>`/`<audio>`, no Media
   Source Extensions, no WebGL/canvas, and no Widevine/Playfair. **YouTube and
   other streaming sites cannot play video** — this needs a licensed DRM module
