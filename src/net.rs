@@ -2,6 +2,7 @@
 //! decompression, a shared response cache, and browser-style error reporting.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use ureq::{Agent, ResponseExt};
@@ -112,7 +113,7 @@ impl FetchResult {
 fn agent() -> &'static Agent {
     static AGENT: OnceLock<Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        Agent::new_with_config(
+        let a = Agent::new_with_config(
             Agent::config_builder()
                 .user_agent(USER_AGENT)
                 .max_redirects(8)
@@ -120,8 +121,101 @@ fn agent() -> &'static Agent {
                 .http_status_as_error(false)
                 .timeout_global(Some(Duration::from_secs(25)))
                 .build(),
-        )
+        );
+        // Restore any persisted session cookies so logins survive restarts.
+        load_cookies_into(&a);
+        a
     })
+}
+
+// ---------------------------------------------------------------------------
+// cookies: a persistent, shared session jar (the basis of all web auth)
+// ---------------------------------------------------------------------------
+
+/// Per-user data directory, honouring `$XDG_DATA_HOME` and falling back to
+/// `~/.local/share`. Cookies live here so a login survives across runs.
+pub fn data_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
+        && !xdg.trim().is_empty()
+    {
+        return PathBuf::from(xdg).join("ferris-browser");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("ferris-browser");
+    }
+    PathBuf::from(".ferris-browser")
+}
+
+fn cookie_file() -> PathBuf {
+    data_dir().join("cookies.json")
+}
+
+fn load_cookies_into(a: &Agent) {
+    let path = cookie_file();
+    if let Ok(file) = std::fs::File::open(&path) {
+        let reader = std::io::BufReader::new(file);
+        // A corrupt/partial file must never stop the browser from starting.
+        let _ = a.cookie_jar_lock().load_json(reader);
+    }
+}
+
+/// Write the current cookie jar to disk so sessions persist across restarts.
+/// Cheap enough to call after each top-level navigation.
+pub fn persist_cookies() {
+    let dir = data_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = cookie_file();
+    if let Ok(mut file) = std::fs::File::create(&path) {
+        let _ = agent().cookie_jar_lock().save_json(&mut file);
+    }
+}
+
+/// Drop every cookie (and the on-disk copy) — the browser's "clear session".
+pub fn clear_cookies() {
+    agent().cookie_jar_lock().clear();
+    let _ = std::fs::remove_file(cookie_file());
+}
+
+/// How many cookies are currently stored. Useful for tests and `/info`.
+pub fn cookie_count() -> usize {
+    agent().cookie_jar_lock().iter().count()
+}
+
+/// All unexpired cookies as a `name=value; …` string, for `document.cookie`.
+pub fn cookies_as_header() -> String {
+    let jar = agent().cookie_jar_lock();
+    let mut out = String::new();
+    for c in jar.iter() {
+        if !out.is_empty() {
+            out.push_str("; ");
+        }
+        out.push_str(c.name());
+        out.push('=');
+        out.push_str(c.value());
+    }
+    out
+}
+
+/// Store a cookie set from script (`document.cookie = "k=v; path=/; …"`),
+/// scoped to `page_url` following the RFC 6265 storage model.
+pub fn set_cookie_from_script(page_url: &Url, cookie_str: &str) -> bool {
+    let uri = match page_url.as_str().parse::<ureq::http::Uri>() {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+    let cookie = match ureq::Cookie::parse(cookie_str.to_string(), &uri) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    agent()
+        .cookie_jar_lock()
+        .insert(cookie, &uri)
+        .is_ok()
 }
 
 /// Turn user input into an absolute URL, adding `https://` when the scheme is
@@ -212,7 +306,84 @@ pub fn fetch(url: &Url, max_bytes: usize) -> Result<FetchResult, FetchError> {
         .header("Connection", "close")
         .call()
         .map_err(|e| err(classify(&e), e.to_string()))?;
+    read_response(res, url, started, max_bytes)
+}
 
+/// POST a raw body (e.g. a form encoding) and read the response. Cookies are
+/// attached automatically and any redirect chain is followed.
+pub fn fetch_post(
+    url: &Url,
+    body: Vec<u8>,
+    content_type: &str,
+    max_bytes: usize,
+) -> Result<FetchResult, FetchError> {
+    let started = Instant::now();
+    let res = agent()
+        .post(url.as_str())
+        .header("Content-Type", content_type)
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .header("Accept-Encoding", "gzip, deflate, br")
+        .send(body)
+        .map_err(|e| err(classify(&e), e.to_string()))?;
+    read_response(res, url, started, max_bytes)
+}
+
+/// Submit an HTML form as `application/x-www-form-urlencoded`.
+pub fn submit_form(
+    url: &Url,
+    fields: &[(String, String)],
+    max_bytes: usize,
+) -> Result<FetchResult, FetchError> {
+    let body = encode_form(fields);
+    fetch_post(
+        url,
+        body.into_bytes(),
+        "application/x-www-form-urlencoded",
+        max_bytes,
+    )
+}
+
+/// Percent-encode form fields into `application/x-www-form-urlencoded`.
+/// Spaces become `+`, per the HTML form spec (not RFC 3986 `%20`).
+pub fn encode_form(fields: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (i, (k, v)) in fields.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        out.push_str(&urlenc_form(k));
+        out.push('=');
+        out.push_str(&urlenc_form(v));
+    }
+    out
+}
+
+fn urlenc_form(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Shared tail of every request: pull status, content-type, final URL and a
+/// size-capped body out of a ureq `Response`.
+fn read_response(
+    res: ureq::http::Response<ureq::Body>,
+    fallback: &Url,
+    started: Instant,
+    max_bytes: usize,
+) -> Result<FetchResult, FetchError> {
     let status = res.status().as_u16();
     let content_type = res
         .headers()
@@ -226,7 +397,7 @@ pub fn fetch(url: &Url, max_bytes: usize) -> Result<FetchResult, FetchError> {
         .get_uri()
         .to_string()
         .parse::<Url>()
-        .unwrap_or_else(|_| url.clone());
+        .unwrap_or_else(|_| fallback.clone());
 
     let mut body = res
         .into_body()
@@ -392,5 +563,41 @@ mod tests {
         let e = err(FetchErrorKind::Dns, "no such host".to_string());
         assert_eq!(e.headline(), "This site can't be reached");
         assert!(e.detail().contains("DNS"));
+    }
+
+    #[test]
+    fn form_encoding_is_spec_shaped() {
+        let fields = vec![
+            ("user".to_string(), "ada lovelace".to_string()),
+            ("pass".to_string(), "p@ss&w=rd!".to_string()),
+            ("empty".to_string(), String::new()),
+        ];
+        let enc = encode_form(&fields);
+        // Spaces -> '+', reserved chars percent-encoded, pairs joined by '&'.
+        assert_eq!(
+            enc,
+            "user=ada+lovelace&pass=p%40ss%26w%3Drd%21&empty="
+        );
+    }
+
+    #[test]
+    fn cookie_roundtrip_in_memory() {
+        // Script-set cookie is stored and readable via the header form.
+        let url = normalize("https://example.org/acct").unwrap();
+        assert!(set_cookie_from_script(&url, "sid=abc123; path=/"));
+        let header = cookies_as_header();
+        assert!(
+            header.contains("sid=abc123"),
+            "expected sid in {header:?}"
+        );
+        assert!(cookie_count() >= 1);
+        // A bogus cookie string must be rejected, not panic.
+        assert!(!set_cookie_from_script(&url, ";;;not a cookie;;"));
+    }
+
+    #[test]
+    fn data_dir_is_absolute_under_home_or_cwd() {
+        let d = data_dir();
+        assert!(d.ends_with("ferris-browser"), "{d:?}");
     }
 }

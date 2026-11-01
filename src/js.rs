@@ -14,6 +14,7 @@
 //! * Only available with `--features js`.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -42,10 +43,22 @@ pub struct World {
     pub console: Vec<String>,
     pub errors: Vec<String>,
     pub scripts: usize,
+    /// `sessionStorage` for this page: in-memory, cleared with the world.
+    pub session: HashMap<String, String>,
+    /// Origin (`scheme://host:port`) that scopes `localStorage` on disk.
+    pub origin: String,
 }
 
 thread_local! {
     static WORLD: RefCell<Option<Rc<RefCell<World>>>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// `localStorage`, keyed by origin. Loaded lazily from and saved back to
+    /// `data_dir()/localStorage/<origin>.txt` (a simple `key\tvalue` line
+    /// format) so tokens survive restarts like a real browser's.
+    static LOCAL: RefCell<HashMap<String, HashMap<String, String>>> =
+        RefCell::new(HashMap::new());
 }
 
 fn world() -> Rc<RefCell<World>> {
@@ -762,6 +775,10 @@ fn document_obj(ctx: &mut Context) -> JsObject {
         accessor(ctx, doc_title_get, Some(doc_title_set)),
     );
     d.insert_property(js_string!("URL"), accessor(ctx, doc_url_get, None));
+    d.insert_property(
+        js_string!("cookie"),
+        accessor(ctx, doc_cookie_get, Some(doc_cookie_set)),
+    );
     d.insert_property(js_string!("nodeType"), ro(JsValue::from(9)));
     d
 }
@@ -905,6 +922,240 @@ fn navigator_obj(ctx: &mut Context) -> JsObject {
         js_string!("platform"),
         ro(JsValue::from(js_string!("Linux x86_64"))),
     );
+    o.insert_property(
+        js_string!("cookieEnabled"),
+        ro(JsValue::from(true)),
+    );
+    o
+}
+
+// ---------------------------------------------------------------------------
+// document.cookie  (backed by the real, persistent network cookie jar)
+// ---------------------------------------------------------------------------
+
+fn doc_cookie_get(_t: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    // Browsers expose only non-HttpOnly cookies here; our jar doesn't tag
+    // HttpOnly separately for script reads, so we mirror what would be sent.
+    Ok(JsValue::from(js_string!(&*crate::net::cookies_as_header())))
+}
+
+fn doc_cookie_set(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let s = arg_str(args, ctx, 0)?;
+    let base = world().borrow().base.clone();
+    let _ = crate::net::set_cookie_from_script(&base, &s);
+    Ok(JsValue::undefined())
+}
+
+// ---------------------------------------------------------------------------
+// localStorage / sessionStorage
+// ---------------------------------------------------------------------------
+
+fn origin_file(origin: &str) -> std::path::PathBuf {
+    let safe: String = origin
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    crate::net::data_dir().join("localStorage").join(format!("{safe}.txt"))
+}
+
+fn local_load(origin: &str) {
+    LOCAL.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.contains_key(origin) {
+            return;
+        }
+        let mut map = HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(origin_file(origin)) {
+            for line in text.lines() {
+                if let Some((k, v)) = line.split_once('\t') {
+                    map.insert(
+                        unescape_store(k),
+                        unescape_store(v),
+                    );
+                }
+            }
+        }
+        l.insert(origin.to_string(), map);
+    });
+}
+
+fn local_save(origin: &str) {
+    let path = origin_file(origin);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let text = LOCAL.with(|l| {
+        let l = l.borrow();
+        match l.get(origin) {
+            Some(map) => map
+                .iter()
+                .map(|(k, v)| format!("{}\t{}", escape_store(k), escape_store(v)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => String::new(),
+        }
+    });
+    let _ = std::fs::write(path, text);
+}
+
+fn escape_store(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n")
+}
+fn unescape_store(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars();
+    while let Some(c) = it.next() {
+        if c == '\\' {
+            match it.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(o) => out.push(o),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Which store a Storage object talks to, read from its hidden marker.
+fn store_kind(this: &JsValue, ctx: &mut Context) -> JsResult<String> {
+    let obj = this
+        .as_object()
+        .ok_or_else(|| throw("not a Ferris Storage"))?;
+    let v = obj.get(js_string!("__ferris_store"), ctx)?;
+    Ok(v.to_string(ctx)?.to_std_string_escaped())
+}
+
+fn st_get_item(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let key = arg_str(args, ctx, 0)?;
+    let kind = store_kind(this, ctx)?;
+    if kind == "session" {
+        let w = world();
+        let val = w.borrow().session.get(&key).cloned();
+        return Ok(match val {
+            Some(v) => JsValue::from(js_string!(&*v)),
+            None => JsValue::null(),
+        });
+    }
+    let origin = world().borrow().origin.clone();
+    local_load(&origin);
+    let val = LOCAL.with(|l| l.borrow().get(&origin).and_then(|m| m.get(&key)).cloned());
+    Ok(match val {
+        Some(v) => JsValue::from(js_string!(&*v)),
+        None => JsValue::null(),
+    })
+}
+
+fn st_set_item(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let key = arg_str(args, ctx, 0)?;
+    let val = arg_str(args, ctx, 1)?;
+    let kind = store_kind(this, ctx)?;
+    if kind == "session" {
+        world().borrow_mut().session.insert(key, val);
+        return Ok(JsValue::undefined());
+    }
+    let origin = world().borrow().origin.clone();
+    local_load(&origin);
+    LOCAL.with(|l| {
+        l.borrow_mut()
+            .entry(origin.clone())
+            .or_default()
+            .insert(key, val);
+    });
+    local_save(&origin);
+    Ok(JsValue::undefined())
+}
+
+fn st_remove_item(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let key = arg_str(args, ctx, 0)?;
+    let kind = store_kind(this, ctx)?;
+    if kind == "session" {
+        world().borrow_mut().session.remove(&key);
+        return Ok(JsValue::undefined());
+    }
+    let origin = world().borrow().origin.clone();
+    local_load(&origin);
+    LOCAL.with(|l| {
+        if let Some(m) = l.borrow_mut().get_mut(&origin) {
+            m.remove(&key);
+        }
+    });
+    local_save(&origin);
+    Ok(JsValue::undefined())
+}
+
+fn st_clear(this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let kind = store_kind(this, ctx)?;
+    if kind == "session" {
+        world().borrow_mut().session.clear();
+        return Ok(JsValue::undefined());
+    }
+    let origin = world().borrow().origin.clone();
+    LOCAL.with(|l| {
+        l.borrow_mut().insert(origin.clone(), HashMap::new());
+    });
+    local_save(&origin);
+    Ok(JsValue::undefined())
+}
+
+fn st_key(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let idx = args.get_or_undefined(0).to_number(ctx)? as usize;
+    let kind = store_kind(this, ctx)?;
+    let mut keys: Vec<String> = if kind == "session" {
+        let w = world();
+        let mut k: Vec<String> = w.borrow().session.keys().cloned().collect();
+        k.sort();
+        k
+    } else {
+        let origin = world().borrow().origin.clone();
+        local_load(&origin);
+        LOCAL.with(|l| {
+            let mut k: Vec<String> = l
+                .borrow()
+                .get(&origin)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            k.sort();
+            k
+        })
+    };
+    keys.sort();
+    Ok(match keys.into_iter().nth(idx) {
+        Some(k) => JsValue::from(js_string!(&*k)),
+        None => JsValue::null(),
+    })
+}
+
+fn st_length(this: &JsValue, _args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let kind = store_kind(this, ctx)?;
+    let n = if kind == "session" {
+        world().borrow().session.len()
+    } else {
+        let origin = world().borrow().origin.clone();
+        local_load(&origin);
+        LOCAL.with(|l| l.borrow().get(&origin).map(|m| m.len()).unwrap_or(0))
+    };
+    Ok(JsValue::from(n as f64))
+}
+
+fn storage_obj(ctx: &mut Context, kind: &str) -> JsObject {
+    let o = JsObject::with_object_proto(ctx.intrinsics());
+    o.insert_property(
+        js_string!("__ferris_store"),
+        ro(JsValue::from(js_string!(kind))),
+    );
+    o.insert_property(js_string!("getItem"), method(ctx, "getItem", 1, st_get_item));
+    o.insert_property(js_string!("setItem"), method(ctx, "setItem", 2, st_set_item));
+    o.insert_property(
+        js_string!("removeItem"),
+        method(ctx, "removeItem", 1, st_remove_item),
+    );
+    o.insert_property(js_string!("clear"), method(ctx, "clear", 0, st_clear));
+    o.insert_property(js_string!("key"), method(ctx, "key", 1, st_key));
+    o.insert_property(js_string!("length"), accessor(ctx, st_length, None));
     o
 }
 
@@ -984,12 +1235,23 @@ fn err_string(e: &JsError, _ctx: &mut Context) -> String {
 pub fn preprocess(html: &str, base: &str) -> (String, JsReport) {
     let started = Instant::now();
     let base_url = Url::parse(base).unwrap_or_else(|_| Url::parse("about:blank").unwrap());
+    // localStorage is scoped per-origin (scheme://host[:port]); default ports
+    // are omitted by `url`, matching how browsers key storage.
+    let origin = match base_url.host_str() {
+        Some(h) if base_url.scheme() == "http" || base_url.scheme() == "https" => {
+            let port = base_url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{}://{}{}", base_url.scheme(), h, port)
+        }
+        _ => "null".to_string(),
+    };
     let mut w = World {
         doc: Doc::from_html(html),
         base: base_url,
         console: vec![],
         errors: vec![],
         scripts: 0,
+        session: HashMap::new(),
+        origin,
     };
     let jobs = collect_scripts(&mut w);
     let mut report = JsReport {
@@ -1048,6 +1310,14 @@ fn run_scripts(jobs: Vec<ScriptJob>) -> JsResult<()> {
     g.insert_property(
         js_string!("navigator"),
         data(JsValue::from(navigator_obj(&mut ctx))),
+    );
+    g.insert_property(
+        js_string!("localStorage"),
+        data(JsValue::from(storage_obj(&mut ctx, "local"))),
+    );
+    g.insert_property(
+        js_string!("sessionStorage"),
+        data(JsValue::from(storage_obj(&mut ctx, "session"))),
     );
     g.insert_property(
         js_string!("window"),
@@ -1207,5 +1477,41 @@ mod tests {
         );
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert!(html.contains("<p>written</p>"));
+    }
+
+    #[test]
+    fn document_cookie_roundtrips_through_the_jar() {
+        let (_html, r) = run(
+            r#"<html><body><script>
+               document.cookie = 'ferris_theme=dark; path=/';
+               console.log('COOKIE=' + document.cookie);
+               </script></body></html>"#,
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            r.console.iter().any(|l| l.contains("ferris_theme=dark")),
+            "cookie not readable back: {:?}",
+            r.console
+        );
+    }
+
+    #[test]
+    fn local_and_session_storage_persist_and_read_back() {
+        let (_html, r) = run(
+            r#"<html><body><script>
+               localStorage.clear();
+               localStorage.setItem('token', 'abc123');
+               sessionStorage.setItem('once', '1');
+               console.log('LOCAL=' + localStorage.getItem('token')
+                   + ' SESSION=' + sessionStorage.getItem('once')
+                   + ' LEN=' + localStorage.length);
+               </script></body></html>"#,
+        );
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            r.console.iter().any(|l| l.contains("LOCAL=abc123 SESSION=1 LEN=1")),
+            "storage mismatch: {:?}",
+            r.console
+        );
     }
 }

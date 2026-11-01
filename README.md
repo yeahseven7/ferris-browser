@@ -138,8 +138,10 @@ engine written in Rust, and turns Ferris into a scripting browser:
   body/head/documentElement), element objects (appendChild/removeChild/
   remove, attributes, classList, innerHTML/textContent, children,
   parentElement, `style.setProperty` which feeds our CSS cascade),
-  `console.*` capture, `location`, `navigator`, `setTimeout` (fires
-  immediately — there is no event loop between paints yet);
+  `console.*` capture, `location`, `navigator`, `document.cookie` and
+  `localStorage`/`sessionStorage` (wired to the real persistent cookie jar and
+  an on-disk per-origin store), `setTimeout` (fires immediately — there is no
+  event loop between paints yet);
 * classic `<script>` tags (inline and fetched `src`) run **in document order**
   in one context before the immutable pipeline parses the mutated HTML;
 * runaway scripts are contained by Boa's loop-iteration and recursion limits;
@@ -207,6 +209,10 @@ you want it in the AUR.
 - [x] in-window address bar + tabs (per-tab history/scroll, caret, select-all)
 - [x] JavaScript via Boa behind a `js` feature, with a swappable DOM shim
       (`ferris jscorpus` = the compat corpus)
+- [x] session layer: persistent cookies + form POST + `document.cookie` /
+      `localStorage` / `sessionStorage` (`examples/auth_demo` proves it live)
+- [ ] interactive forms in the window: type into `<input>`/`<textarea>`, click
+      submit buttons, file uploads, `<select>`
 - [ ] fidelity: floats/positioning, flexbox, shaping (cosmic-text), SVG (resvg)
 - [x] packaging: static musl binary + AppImage + licences/icon/.desktop/man
       (`scripts/package.sh`, crate renamed `ferris-browser`)
@@ -226,6 +232,16 @@ you want it in the AUR.
 **Network** — HTTP and HTTPS (rustls), redirect following, gzip/brotli
 decompression, charset handling, a shared in-memory response cache, browser-style
 error classification (DNS / connection / timeout / TLS / HTTP status).
+
+**Sessions & forms** — a persistent **cookie jar**: `Set-Cookie` is captured and
+the matching `Cookie` header is attached across requests *and* redirects
+(RFC 6265 domain/path/secure rules), saved to
+`~/.local/share/ferris-browser/cookies.json` so logins survive restarts
+(session-only cookies are correctly *not* persisted). **POST** with
+`application/x-www-form-urlencoded` form submission is supported end-to-end.
+Scripts get `document.cookie`, `localStorage` (persisted per-origin to
+`~/.local/share/ferris-browser/localStorage/`) and `sessionStorage`. Run
+`cargo run --release --example auth_demo` for a live proof against httpbin.org.
 
 **CSS** — a hand-written parser (comments, at-rules incl. `@media`/`@supports`,
 selector lists, declarations, `!important`), specificity computation, the full
@@ -257,8 +273,24 @@ of hanging or OOMing; error pages are rendered *through the same engine*.
 
 ## What it does **not** do (honest limitations)
 
-- **No JavaScript.** Pages are rendered as static documents. SPAs that render
-  client-side will show a blank shell.
+- **JavaScript is optional and pre-render only.** With `--features js`, scripts
+  run once against a DOM *mirror* before paint (see the JS section). There is no
+  live event loop, no DOM events (`click`/`input`/`load` handlers don't fire),
+  and no re-layout after script mutation, so **single-page apps still won't
+  work** — pages that render entirely client-side show a blank shell.
+- **No media, no video, no DRM.** There is no `<video>`/`<audio>`, no Media
+  Source Extensions, no WebGL/canvas, and no Widevine/Playfair. **YouTube and
+  other streaming sites cannot play video** — this needs a licensed DRM module
+  that a hobby engine can't ship.
+- **Big-tech OAuth (e.g. "Sign in with Google") is blocked at the source.**
+  Google and similar providers *deliberately refuse* embedded/non-standard
+  browsers ("This browser or app may not be secure"), independent of Ferris.
+  Classic form logins (username + password POSTed to a site's own endpoint) do
+  work now that cookies + POST exist.
+- **No interactive form fields yet.** `<input>`/`<textarea>` render but you
+  can't type into them in the window shell, and submit buttons don't POST —
+  the network/cookie/POST layer beneath them is done (see `render_post`), the
+  on-screen input widgets are the next step.
 - **No `float`, no absolute/fixed positioning, no flexbox/grid.** `flex`/`grid`
   fall back to block layout, so modern site chrome can look stacked rather than
   side-by-side.
@@ -278,7 +310,7 @@ of hanging or OOMing; error pages are rendered *through the same engine*.
 ## Verification
 
 ```bash
-cargo test --release        # 64 tests: unit + layout/paint integration + shell logic + real-socket HTTP
+cargo test --release        # 67 tests: unit + layout/paint integration + shell logic + real-socket HTTP
 cargo clippy --release --all-targets   # 0 warnings, 0 errors
 ```
 
@@ -303,17 +335,18 @@ Sample renders live in `shots/`.
 
 | File | Responsibility |
 |---|---|
-| `src/net.rs` | fetching, TLS, redirects, cache, error taxonomy |
+| `src/net.rs` | fetching, TLS, redirects, cache, error taxonomy, **cookie jar (persistent)**, **POST/form submit** |
 | `src/css.rs` | stylesheet/declaration parsing, specificity |
 | `src/style.rs` | cascade, computed style, UA stylesheet, value parsing |
 | `src/layout.rs` | block/inline/table layout → display list + link rects |
 | `src/paint.rs` | display list → pixels (tiny-skia + ab_glyph) |
 | `src/font.rs` | embedded fonts, metrics, glyph rasterization |
 | `src/color.rs` | colour parsing (named + functional notation) |
-| `src/engine.rs` | pipeline orchestration, error pages |
+| `src/engine.rs` | pipeline orchestration, error pages, `render`/`render_post` (GET + form POST) |
 | `src/server.rs` | HTTP/1.1 server, viewport document, browser chrome |
 | `src/shell.rs` | native window (winit+softbuffer): tabs, address bar, frame compose, hit-test, history, editing |
 | `src/dom.rs` | mutable DOM mirror (arena tree) that scripts mutate; serialize back into the pipeline |
-| `src/js.rs` | Boa bindings behind `--features js`: document/element/console globals, limits, script collection |
+| `src/js.rs` | Boa bindings behind `--features js`: document/element/console globals, `document.cookie`, `localStorage`/`sessionStorage`, limits, script collection |
 | `src/corpus.rs` + `corpus/` | JS compat corpus: 10 fixtures + runner (`ferris jscorpus`) |
+| `examples/auth_demo.rs` | live proof of the session layer (cookies across redirects + form POST) against httpbin.org |
 | `src/main.rs` | CLI (`serve` / `shot` / `info`) |

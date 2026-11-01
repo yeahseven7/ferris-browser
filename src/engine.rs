@@ -88,38 +88,86 @@ pub fn render(input: &str, viewport_w: u32, fetch_images: bool) -> PageRender {
         }
     };
 
-    let t_fetch = Instant::now();
-    let fetched = match net::fetch_cached(&url, net::MAX_BODY_BYTES, Duration::from_secs(60)) {
-        Ok(f) => f,
+    // Top-level navigation always hits the network (never the anonymous cache)
+    // so cookies/sessions are applied and freshly-authenticated content shows.
+    match net::fetch(&url, net::MAX_BODY_BYTES) {
+        Ok(fetched) => render_fetched(fetched, url, viewport_w, fetch_images, started),
+        Err(e) => render_fetch_error(&url, e, viewport_w, fetch_images, started),
+    }
+}
+
+/// Submit an HTML form (POST, url-encoded) and render the response through the
+/// exact same pipeline as a GET navigation. This is what makes login/search
+/// forms work end-to-end.
+pub fn render_post(
+    input: &str,
+    fields: &[(String, String)],
+    viewport_w: u32,
+    fetch_images: bool,
+) -> PageRender {
+    let started = Instant::now();
+    let url = match net::normalize(input) {
+        Ok(u) => u,
         Err(e) => {
-            let code = match e.kind {
-                FetchErrorKind::Dns => "DNS_PROBE_FINISHED_NXDOMAIN",
-                FetchErrorKind::Connection => "ERR_CONNECTION_REFUSED",
-                FetchErrorKind::Timeout => "ERR_TIMED_OUT",
-                FetchErrorKind::Tls => "ERR_CERT_AUTHORITY_INVALID",
-                FetchErrorKind::TooManyRedirects => "ERR_TOO_MANY_REDIRECTS",
-                FetchErrorKind::Http(c) => {
-                    return http_error_page(&url, c, viewport_w, fetch_images, started);
-                }
-                FetchErrorKind::InvalidUrl => "ERR_INVALID_URL",
-                _ => "ERR_FAILED",
-            };
             let info = ErrorInfo {
                 headline: e.headline().to_string(),
                 detail: e.detail(),
-                code: code.to_string(),
+                code: "ERR_INVALID_URL".to_string(),
             };
-            return error_page(
-                url.as_str(),
-                url.as_str(),
-                &info,
-                viewport_w,
-                fetch_images,
-                started,
-            );
+            return error_page(input, input, &info, viewport_w, fetch_images, started);
         }
     };
-    let fetch_elapsed = t_fetch.elapsed();
+    match net::submit_form(&url, fields, net::MAX_BODY_BYTES) {
+        Ok(fetched) => render_fetched(fetched, url, viewport_w, fetch_images, started),
+        Err(e) => render_fetch_error(&url, e, viewport_w, fetch_images, started),
+    }
+}
+
+/// Turn a transport-level fetch error into a rendered browser error page.
+fn render_fetch_error(
+    url: &Url,
+    e: net::FetchError,
+    viewport_w: u32,
+    fetch_images: bool,
+    started: Instant,
+) -> PageRender {
+    let code = match e.kind {
+        FetchErrorKind::Dns => "DNS_PROBE_FINISHED_NXDOMAIN",
+        FetchErrorKind::Connection => "ERR_CONNECTION_REFUSED",
+        FetchErrorKind::Timeout => "ERR_TIMED_OUT",
+        FetchErrorKind::Tls => "ERR_CERT_AUTHORITY_INVALID",
+        FetchErrorKind::TooManyRedirects => "ERR_TOO_MANY_REDIRECTS",
+        FetchErrorKind::Http(c) => return http_error_page(url, c, viewport_w, fetch_images, started),
+        FetchErrorKind::InvalidUrl => "ERR_INVALID_URL",
+        _ => "ERR_FAILED",
+    };
+    let info = ErrorInfo {
+        headline: e.headline().to_string(),
+        detail: e.detail(),
+        code: code.to_string(),
+    };
+    error_page(
+        url.as_str(),
+        url.as_str(),
+        &info,
+        viewport_w,
+        fetch_images,
+        started,
+    )
+}
+
+/// Everything after a successful transport fetch: status handling, non-HTML
+/// wrapping, the optional JS stage, parse, and the shared render pipeline.
+fn render_fetched(
+    fetched: net::FetchResult,
+    url: Url,
+    viewport_w: u32,
+    fetch_images: bool,
+    started: Instant,
+) -> PageRender {
+    let fetch_elapsed = fetched.elapsed;
+    // Persist any cookies this navigation set (login tokens, session ids).
+    net::persist_cookies();
 
     if fetched.status >= 400 {
         return http_error_page_at(
